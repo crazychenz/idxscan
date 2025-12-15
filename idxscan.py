@@ -407,53 +407,56 @@ class Content():
         return self
 
 
-conn = sqlite3.connect("paths.db")
-conn.row_factory = sqlite3.Row
-cursor = conn.cursor()
+def load_database():
 
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS contents (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        size INTEGER NOT NULL,
-        mime TEXT DEFAULT '',
-        sha1 TEXT DEFAULT '',
-        sha224 TEXT DEFAULT '',
-        sha256 TEXT NOT NULL DEFAULT '',
-        sha384 TEXT DEFAULT '',
-        sha512 TEXT DEFAULT '',
-        md5 TEXT DEFAULT '',
-        crc32 TEXT DEFAULT '',
-        header BLOB,
-        footer BLOB,
-        thumbnail_mime TEXT DEFAULT '',
-        thumbnail BLOB,
+    conn = sqlite3.connect("paths.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
 
-        UNIQUE(size, sha256)
-    );
-""")
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS contents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            size INTEGER NOT NULL,
+            mime TEXT DEFAULT '',
+            sha1 TEXT DEFAULT '',
+            sha224 TEXT DEFAULT '',
+            sha256 TEXT NOT NULL DEFAULT '',
+            sha384 TEXT DEFAULT '',
+            sha512 TEXT DEFAULT '',
+            md5 TEXT DEFAULT '',
+            crc32 TEXT DEFAULT '',
+            header BLOB,
+            footer BLOB,
+            thumbnail_mime TEXT DEFAULT '',
+            thumbnail BLOB,
 
-cursor.execute("""
-    CREATE INDEX IF NOT EXISTS idx_contents_sha256 ON contents(sha256);
-""")
+            UNIQUE(size, sha256)
+        );
+    """)
 
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS fileinfo (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        path TEXT NOT NULL UNIQUE,
-        mode INTEGER DEFAULT 0,
-        ctime TIMESTAMP DEFAULT 0,
-        mtime TIMESTAMP DEFAULT 0,
-        size INTEGER DEFAULT 0,
-        isdir INTEGER DEFAULT 0,
-        islink INTEGER DEFAULT 0,
-        ismount INTEGER DEFAULT 0,
-        isregular INTEGER DEFAULT 0,
-        symlink TEXT DEFAULT '',
-        content_id INTEGER DEFAULT 0
-    );
-""")
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_contents_sha256 ON contents(sha256);
+    """)
 
-conn.commit()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS fileinfo (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            path TEXT NOT NULL UNIQUE,
+            mode INTEGER DEFAULT 0,
+            ctime TIMESTAMP DEFAULT 0,
+            mtime TIMESTAMP DEFAULT 0,
+            size INTEGER DEFAULT 0,
+            isdir INTEGER DEFAULT 0,
+            islink INTEGER DEFAULT 0,
+            ismount INTEGER DEFAULT 0,
+            isregular INTEGER DEFAULT 0,
+            symlink TEXT DEFAULT '',
+            content_id INTEGER DEFAULT 0
+        );
+    """)
+
+    conn.commit()
+    return conn
 
 
 libmagic = magic.Magic(mime=True)
@@ -470,18 +473,33 @@ def calculate_content(conn, path):
     return content
 
 
-# Get image mime types:
-#   select mime from contents where mime LIKE 'image%';
+# TODO: Get image mime types to determine when to thumbnail:
+# TODO: - `select mime from contents where mime LIKE 'image%';`
 
+# TODO: Make mime types smarter?
+# TODO: - mime type for tar.gz will only report 'application/gzip'.
+# TODO: - when we care, we need to ungzip ourselves and re-libmagic
 
-count = 0
-for path in walk_follow_symlinks('/home/chenz/idxscan/ignored'):
+def main():
+    conn = load_database()
+    count = 0
+    for path in walk_follow_symlinks('/home/chenz/idxscan/ignored'):
 
-    fi, fileinfo_conflict = FileInfo.create(conn, path)
-    if fileinfo_conflict:
-        fi = FileInfo.load(conn, path)
-        if fi.sync_vfs_info(conn):
-            print(f'DIRTY: {fi.path}')
+        fi, fileinfo_conflict = FileInfo.create(conn, path)
+        if fileinfo_conflict:
+            fi = FileInfo.load(conn, path)
+            if fi.sync_vfs_info(conn):
+                print(f'DIRTY: {fi.path}')
+                if fi.isregular and not fi.isdir:
+                    # If readable file (not folder or device), calculate content
+                    content = calculate_content(conn, fi.path)
+                    fi.update(content_id=content.id).save(conn)
+                else:
+                    # Ensure there is no content_id for folder path or device path
+                    fi.update(content_id=0).save(conn)
+        else:
+            print(f'NEW: {fi.path}')
+            fi.sync_vfs_info(conn)
             if fi.isregular and not fi.isdir:
                 # If readable file (not folder or device), calculate content
                 content = calculate_content(conn, fi.path)
@@ -489,19 +507,13 @@ for path in walk_follow_symlinks('/home/chenz/idxscan/ignored'):
             else:
                 # Ensure there is no content_id for folder path or device path
                 fi.update(content_id=0).save(conn)
-    else:
-        print(f'NEW: {fi.path}')
-        fi.sync_vfs_info(conn)
-        if fi.isregular and not fi.isdir:
-            # If readable file (not folder or device), calculate content
-            content = calculate_content(conn, fi.path)
-            fi.update(content_id=content.id).save(conn)
-        else:
-            # Ensure there is no content_id for folder path or device path
-            fi.update(content_id=0).save(conn)
 
-    count += 1
-    if count % 100 == 0:
-        print(f"PROCESSED {count} PATHS.")
+        count += 1
+        if count % 100 == 0:
+            print(f"PROCESSED {count} PATHS.")
 
-print(f"PROCESSED {count} PATHS.")
+    print(f"PROCESSED {count} PATHS.")
+
+
+if __name__ == "__main__":
+    main()
