@@ -41,7 +41,7 @@ import sqlite3
 from dataclasses import dataclass, fields
 
 # apt-get install python3-magic
-#import magic
+import magic
 
 
 def walk_follow_symlinks(top, visited=None):
@@ -85,6 +85,43 @@ def walk_follow_symlinks(top, visited=None):
         yield from walk_follow_symlinks(path, visited)
 
 
+def hash_file(path, chunk_size=8192):
+    import hashlib
+    import zlib
+
+    """Compute SHA1, SHA256, SHA512, MD5, and CRC32 in a single pass."""
+    sha1 = hashlib.sha1()
+    sha224 = hashlib.sha224()
+    sha256 = hashlib.sha256()
+    sha384 = hashlib.sha384()
+    sha512 = hashlib.sha512()
+    md5 = hashlib.md5()
+    crc32 = 0
+    size = 0
+
+    with open(path, "rb") as f:
+        while chunk := f.read(chunk_size):
+            size += len(chunk)
+            sha1.update(chunk)
+            sha224.update(chunk)
+            sha256.update(chunk)
+            sha384.update(chunk)
+            sha512.update(chunk)
+            md5.update(chunk)
+            crc32 = zlib.crc32(chunk, crc32)
+
+    return {
+        "sha1": sha1.hexdigest(),
+        "sha224": sha224.hexdigest(),
+        "sha256": sha256.hexdigest(),
+        "sha384": sha384.hexdigest(),
+        "sha512": sha512.hexdigest(),
+        "md5": md5.hexdigest(),
+        "crc32": format(crc32 & 0xFFFFFFFF, "08x"),
+        "size": size,
+    }
+
+
 @dataclass(slots=True)
 class FileInfo():
     id: int = -1
@@ -98,6 +135,7 @@ class FileInfo():
     ismount: int = 0
     isregular: int = 0
     symlink: int = ''
+    content_id: int = 0
 
 
     @classmethod
@@ -129,12 +167,12 @@ class FileInfo():
         cursor = conn.cursor()
 
         row = cursor.execute("""
-            SELECT id, path, mode, ctime, mtime, size, isdir, islink, ismount, isregular, symlink
+            SELECT id, path, mode, ctime, mtime, size, isdir, islink, ismount, isregular, symlink, content_id
             FROM fileinfo WHERE path = ?
         """, (path,)).fetchone()
 
         if row is None:
-            raise KeyError(f'Path not found: {from_path}')
+            raise KeyError(f'Path not found: {path}')
         
         return cls(**row)
 
@@ -154,7 +192,8 @@ class FileInfo():
                     islink = ?,
                     ismount = ?,
                     isregular = ?,
-                    symlink = ?
+                    symlink = ?,
+                    content_id = ?
                 WHERE path = ?
             """,
             (
@@ -167,6 +206,7 @@ class FileInfo():
                 self.ismount,
                 self.isregular,
                 self.symlink,
+                self.content_id,
                 self.path
             )
         )
@@ -175,6 +215,17 @@ class FileInfo():
         if cursor.rowcount != 1:
             raise Exception(f'Bad fileinfo update rowcount: rowcount {cursor.rowcount} id {self.id} path {self.data.path}')
 
+        return self
+
+    
+    def update(self, **attrs):
+        field_names = {f.name for f in fields(self)}
+        for key, value in attrs.items():
+            if key in field_names:
+                setattr(self, key, value)
+            else:
+                raise AttributeError(f"{key} is not a valid field")
+      
         return self
 
 
@@ -211,6 +262,7 @@ class FileInfo():
             dirty = True
             self.ismount = os.path.ismount(self.path)
 
+        # TODO: I've lost the point here.
         isregular = not (os.path.exists(self.path) and not os.path.isfile(self.path) and not self.isdir)
         if self.isregular != isregular:
             dirty = True
@@ -227,46 +279,132 @@ class FileInfo():
         return dirty
 
 
-# def update_file_mime(db, path):
-#     mime = "undefined"
-#     try:
-#         mime = ms.from_file(path)
-#     except:
-#         pass
+@dataclass(slots=True)
+class Content():
+    id: int = -1
+    size: int = 0
+    mime: str = ''
+    sha1: str = ''
+    sha224: str = ''
+    sha256: str = ''
+    sha384: str = ''
+    sha512: str = ''
+    md5: str = ''
+    crc32: str = ''
+    header: bytes = bytes()
+    footer: bytes = bytes()
+    thumbnail_mime: str = ''
+    thumbnail: bytes = bytes()
 
-#     db.commit_execute("UPDATE paths SET mime = ? WHERE path = ?", (mime, path))
 
-#     return mime
+    @classmethod
+    def create(cls, conn, size, sha256):
+        # Note: Intentionally not falling back to load().
+        cursor = conn.cursor()
+
+        # Try inserting the filename.
+        cursor.execute("""
+                INSERT INTO contents (size, sha256) VALUES (?, ?)
+                ON CONFLICT(size, sha256) DO NOTHING
+            """, (size, sha256))
+        conn.commit()
+
+        # Create object ref to return
+        obj = None
+        if cursor.lastrowid != 0:
+            # If we had no conflict, create the object.
+            obj = cls(id=cursor.lastrowid, size=size, sha256=sha256)
+
+        # Return the object reference and if there was a conflict.
+        return obj, cursor.lastrowid == 0
 
 
-# def hash_file(path, chunk_size=8192):
-#     import hashlib
-#     import zlib
+    @classmethod
+    def load(cls, conn, size, sha256):
+        # Assumption: conn.row_factory = sqlite3.Row
+        # Note: Intentionally not falling back to create().
+        cursor = conn.cursor()
 
-#     """Compute SHA1, SHA256, SHA512, MD5, and CRC32 in a single pass."""
-#     sha1 = hashlib.sha1()
-#     sha256 = hashlib.sha256()
-#     sha512 = hashlib.sha512()
-#     md5 = hashlib.md5()
-#     crc32 = 0
+        row = cursor.execute("""
+            SELECT
+                id,
+                size,
+                mime,
+                sha1,
+                sha224,
+                sha256,
+                sha384,
+                sha512,
+                md5,
+                crc32,
+                header,
+                footer,
+                thumbnail_mime,
+                thumbnail
+            FROM contents WHERE size = ? AND sha256 = ?
+        """, (size, sha256)).fetchone()
 
-#     with open(path, "rb") as f:
-#         while chunk := f.read(chunk_size):
-#             sha1.update(chunk)
-#             sha256.update(chunk)
-#             sha512.update(chunk)
-#             md5.update(chunk)
-#             crc32 = zlib.crc32(chunk, crc32)  # update crc32 incrementally
+        if row is None:
+            raise KeyError(f'Content not found: size {size} sha256 {sha256}')
+        
+        return cls(**row)
 
-#     # Return hex digests
-#     return {
-#         "sha1": sha1.hexdigest(),
-#         "sha256": sha256.hexdigest(),
-#         "sha512": sha512.hexdigest(),
-#         "md5": md5.hexdigest(),
-#         "crc32": format(crc32 & 0xFFFFFFFF, "08x")  # zero-padded hex
-#     }
 
+    def save(self, conn):
+        # Assumption: Path is set.
+        cursor = conn.cursor()
+
+        params = (
+            self.mime,
+            self.sha1,
+            self.sha224,
+            self.sha384,
+            self.sha512,
+            self.md5,
+            self.crc32,
+            self.header,
+            self.footer,
+            self.thumbnail_mime,
+            self.thumbnail,
+            self.size,
+            self.sha256
+        )
+
+        cursor.execute(\
+            """
+                UPDATE contents
+                SET 
+                    mime = ?,
+                    sha1 = ?,
+                    sha224 = ?,
+                    sha384 = ?,
+                    sha512 = ?,
+                    md5 = ?,
+                    crc32 = ?,
+                    header = ?,
+                    footer = ?,
+                    thumbnail_mime = ?,
+                    thumbnail = ?
+                WHERE size = ? AND sha256 = ?
+            """, params
+        )
+        conn.commit()
+
+        if cursor.rowcount != 1:
+            raise Exception(f'Bad contents update rowcount: rowcount {cursor.rowcount} sha256 {self.sha256}')
+
+        return self
+
+
+    def update(self, **attrs):
+        field_names = {f.name for f in fields(self)}
+        for key, value in attrs.items():
+            if key in field_names:
+                setattr(self, key, value)
+            else:
+                raise AttributeError(f"{key} is not a valid field")
+      
+        return self
 
 
 conn = sqlite3.connect("paths.db")
@@ -276,18 +414,18 @@ cursor = conn.cursor()
 cursor.execute("""
     CREATE TABLE IF NOT EXISTS contents (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        size INTEGER,
-        mime TEXT,
-        sha1 TEXT,
-        sha224 TEXT,
-        sha256 TEXT,
-        sha384 TEXT,
-        sha512 TEXT,
-        md5 TEXT,
-        crc32 TEXT,
+        size INTEGER NOT NULL,
+        mime TEXT DEFAULT '',
+        sha1 TEXT DEFAULT '',
+        sha224 TEXT DEFAULT '',
+        sha256 TEXT NOT NULL DEFAULT '',
+        sha384 TEXT DEFAULT '',
+        sha512 TEXT DEFAULT '',
+        md5 TEXT DEFAULT '',
+        crc32 TEXT DEFAULT '',
         header BLOB,
         footer BLOB,
-        thumbnail_mime TEXT,
+        thumbnail_mime TEXT DEFAULT '',
         thumbnail BLOB,
 
         UNIQUE(size, sha256)
@@ -318,21 +456,52 @@ cursor.execute("""
 conn.commit()
 
 
+libmagic = magic.Magic(mime=True)
+def calculate_content(conn, path):
+    hashes = hash_file(path)
+    content, content_conflict = Content.create(conn, hashes['size'], hashes['sha256'])
+    if content_conflict:
+        content = Content.load(conn, hashes['size'], hashes['sha256'])
+    
+    hashes['mime'] = libmagic.from_file(path)
+    content.update(**hashes).save(conn)
+    # TODO: Update mime type
+    # TODO: map content to fileinfo
+    # TODO: If mime type is thumbnail-able, generate thumbnail
+
+    return content
+
+
+# Get image mime types:
+#   select mime from contents where mime LIKE 'image%';
+
 
 count = 0
 for path in walk_follow_symlinks('/home/chenz/idxscan/ignored'):
 
-    fi, conflict = FileInfo.create(conn, path)
-    if conflict:
+    fi, fileinfo_conflict = FileInfo.create(conn, path)
+    if fileinfo_conflict:
         fi = FileInfo.load(conn, path)
         if fi.sync_vfs_info(conn):
             print(f'DIRTY: {fi.path}')
-            # TODO: Update content and map content to fileinfo
+            if fi.isregular and not fi.isdir:
+                # If readable file (not folder or device), calculate content
+                content = calculate_content(conn, fi.path)
+                fi.update(content_id=content.id).save(conn)
+            else:
+                # Ensure there is no content_id for folder path or device path
+                fi.update(content_id=0).save(conn)
     else:
         print(f'NEW: {fi.path}')
         fi.sync_vfs_info(conn)
-        # TODO: Do content create and map content to fileinfo
-    
+        if fi.isregular and not fi.isdir:
+            # If readable file (not folder or device), calculate content
+            content = calculate_content(conn, fi.path)
+            fi.update(content_id=content.id).save(conn)
+        else:
+            # Ensure there is no content_id for folder path or device path
+            fi.update(content_id=0).save(conn)
+
     count += 1
     if count % 100 == 0:
         print(f"PROCESSED {count} PATHS.")
