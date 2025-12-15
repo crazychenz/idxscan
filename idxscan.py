@@ -85,157 +85,64 @@ def walk_follow_symlinks(top, visited=None):
         yield from walk_follow_symlinks(path, visited)
 
 
-# class SQLiteConnection():
-#     def __init__(self, db_path):
-#         self.conn = sqlite3.connect(db_path)
-#         self.default_cursor = self.conn.cursor()
-
-#     def execute(self, *args):
-#         self.default_cursor.execute(*args)
-
-#     def commit(self):
-#         self.conn.commit()
-
-#     def commit_execute(self, *args):
-#         self.execute(*args)
-#         self.commit()
-
-#     def lastrowid(self):
-#         return self.default_cursor.lastrowid
-
-#     def fetchone(self):
-#         return self.default_cursor.fetchone()
-
-
-#     def prepare_database(self):
-
-#         # Content specific data.
-#         self.execute("""
-#             CREATE TABLE IF NOT EXISTS contents (
-#                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-#                 size INTEGER,
-#                 mime TEXT,
-#                 sha1 TEXT,
-#                 sha224 TEXT,
-#                 sha256 TEXT,
-#                 sha384 TEXT,
-#                 sha512 TEXT,
-#                 md5 TEXT,
-#                 crc32 TEXT,
-#                 header BLOB,
-#                 footer BLOB,
-#                 thumbnail_mime TEXT,
-#                 thumbnail BLOB,
-
-#                 UNIQUE(size, sha256)
-#             );
-#         """)
-
-#         self.execute("""
-#             CREATE INDEX IF NOT EXISTS idx_contents_sha256 ON contents(sha256);
-#         """)
-
-#         self.execute("""
-#             CREATE TABLE IF NOT EXISTS fileinfo (
-#                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-#                 path TEXT UNIQUE,
-#                 mode INTEGER,
-#                 ctime TIMESTAMP,
-#                 mtime TIMESTAMP,
-#                 isdir INTEGER,
-#                 islink INTEGER,
-#                 ismount INTEGER,
-#                 isregular INTEGER,
-#                 symlink TEXT,
-#                 content_id INTEGER
-#             );
-#         """)
-
-#         return self
-    
-    
-#     def close(self):
-#         self.conn.close()
-
-
+@dataclass(slots=True)
 class FileInfo():
-    @dataclass(slots=True)
-    class _FileInfo():
-        id: int = -1
-        path: str = ''
-        mode: int = 0
-        ctime: int = 0
-        mtime: int = 0
-        size: int = 0
-        isdir: int = 0
-        islink: int = 0
-        ismount: int = 0
-        isregular: int = 0
-        symlink: int = ''
+    id: int = -1
+    path: str = ''
+    mode: int = 0
+    ctime: int = 0
+    mtime: int = 0
+    size: int = 0
+    isdir: int = 0
+    islink: int = 0
+    ismount: int = 0
+    isregular: int = 0
+    symlink: int = ''
 
 
-    def __init__(self, conn, from_path=None, data={}):
-        self.conn = conn
-        
-        self.cursor = self.conn.cursor()
-        self.data = FileInfo._FileInfo(**data)
-
-        if from_path:
-            self.load_from_path(from_path)
-
-
-    def commit(self):
-        if self.data.id == -1:
-            rowid, conflict = self._insert_fileinfo()
-            if not conflict:
-                return
-
-        self._update_fileinfo()
-
-
-    def _insert_fileinfo(self):
-        data = self.data
+    @classmethod
+    def create(cls, conn, path):
+        # Note: Intentionally not falling back to load().
+        cursor = conn.cursor()
 
         # Try inserting the filename.
-        self.cursor.execute("""
-                INSERT INTO fileinfo (
-                path,
-                mode,
-                ctime,
-                mtime,
-                size,
-                isdir,
-                islink,
-                ismount,
-                isregular,
-                symlink
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        cursor.execute("""
+                INSERT INTO fileinfo (path) VALUES (?)
                 ON CONFLICT(path) DO NOTHING
-            """,
-            (
-                data.path,
-                data.mode,
-                data.ctime,
-                data.mtime,
-                data.size,
-                data.isdir,
-                data.islink,
-                data.ismount,
-                data.isregular,
-                data.symlink,
-            )
-        )
-        self.conn.commit()
+            """, (path,))
+        conn.commit()
 
-        # If row was inserted, lastrowid is nonzero.
-        return self.cursor.lastrowid, self.cursor.lastrowid == 0
+        # Create object ref to return
+        obj = None
+        if cursor.lastrowid != 0:
+            # If we had no conflict, create the object.
+            obj = cls(id=cursor.lastrowid, path=path)
+
+        # Return the object reference and if there was a conflict.
+        return obj, cursor.lastrowid == 0
 
 
-    def _update_fileinfo(self):
-        data = self.data
+    @classmethod
+    def load(cls, conn, path):
+        # Assumption: conn.row_factory = sqlite3.Row
+        # Note: Intentionally not falling back to create().
+        cursor = conn.cursor()
 
-        self.cursor.execute(\
+        row = cursor.execute("""
+            SELECT id, path, mode, ctime, mtime, size, isdir, islink, ismount, isregular, symlink
+            FROM fileinfo WHERE path = ?
+        """, (path,)).fetchone()
+
+        if row is None:
+            raise KeyError(f'Path not found: {from_path}')
+        
+        return cls(**row)
+
+
+    def save(self, conn):
+        # Assumption: Path is set.
+        cursor = conn.cursor()
+        cursor.execute(\
             """
                 UPDATE fileinfo
                 SET 
@@ -251,96 +158,73 @@ class FileInfo():
                 WHERE path = ?
             """,
             (
-                data.mode,
-                data.ctime,
-                data.mtime,
-                data.size,
-                data.isdir,
-                data.islink,
-                data.ismount,
-                data.isregular,
-                data.symlink,
-                data.path
+                self.mode,
+                self.ctime,
+                self.mtime,
+                self.size,
+                self.isdir,
+                self.islink,
+                self.ismount,
+                self.isregular,
+                self.symlink,
+                self.path
             )
         )
-        self.conn.commit()
+        conn.commit()
 
-        if self.cursor.rowcount != 1:
-            raise Exception(f'Bad fileinfo update rowcount: rowcount {self.cursor.rowcount} id {self.data.id} path {self.data.path}')
+        if cursor.rowcount != 1:
+            raise Exception(f'Bad fileinfo update rowcount: rowcount {cursor.rowcount} id {self.id} path {self.data.path}')
 
-
-    def load_vfs_info(self):
-        st = os.lstat(self.data.path)
-        self.data.mode = st.st_mode
-        self.data.ctime = st.st_ctime 
-        self.data.mtime = st.st_mtime
-        self.data.size = st.st_size
-        self.data.isdir = stat.S_ISDIR(st.st_mode)
-        self.data.islink = stat.S_ISLNK(st.st_mode)
-        self.data.ismount = os.path.ismount(self.data.path)
-        self.data.isregular = not (os.path.exists(self.data.path) and not os.path.isfile(self.data.path) and not self.data.isdir)
-        self.data.symlink = os.readlink(self.data.path) if self.data.islink else ''
+        return self
 
 
-    def load_from_path(self, from_path):
-        row = self.cursor.execute("""
-            SELECT id, path, mode, ctime, mtime, size, isdir, islink, ismount, isregular, symlink
-            FROM fileinfo WHERE path = ?
-        """, (from_path,)).fetchone()
+    def sync_vfs_info(self, conn):
+        # Assumption: Path is set.
+        st = os.lstat(self.path)
+        dirty = False
 
-        if row is None:
-            raise Exception(f'Path not found: {from_path}')
-        else:
-            self.data = FileInfo._FileInfo(**row)
+        if self.mode != st.st_mode:
+            dirty = True
+            self.mode = st.st_mode
 
+        if self.ctime != st.st_ctime:
+            dirty = True
+            self.ctime = st.st_ctime
 
-# def try_insert_file(db, path, mode, ctime, mtime, size, isdir, islink, ismount, isregular, symlink):
-#     # Try inserting the filename.
-#     db.execute("""
-#         INSERT INTO fileinfo (path, mode, ctime, mtime, size, isdir, islink, ismount, isregular, symlink)
-#         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-#         ON CONFLICT(path) DO NOTHING
-#     """, (path, mode, ctime, mtime, size, isdir, islink, ismount, isregular, symlink))
+        if self.mtime != st.st_mtime:
+            dirty = True
+            self.mtime = st.st_mtime
+        
+        if self.size != st.st_size:
+            dirty = True
+            self.size = st.st_size
 
-#     # If row was inserted, lastrowid is nonzero.
-#     return db.lastrowid(), db.lastrowid() == 0
+        if self.isdir != stat.S_ISDIR(st.st_mode):
+            dirty = True
+            self.isdir = stat.S_ISDIR(st.st_mode)
 
+        if self.islink != stat.S_ISLNK(st.st_mode):
+            dirty = True
+            self.islink = stat.S_ISLNK(st.st_mode)
+        
+        if self.ismount != os.path.ismount(self.path):
+            dirty = True
+            self.ismount = os.path.ismount(self.path)
 
-# def try_insert_content(db, path, mode, ctime, mtime, size, isdir, islink, ismount, isregular, symlink):
-#     # Try inserting the filename.
-#     db.execute("""
-#         INSERT INTO fileinfo (path, mode, ctime, mtime, size, isdir, islink, ismount, isregular, symlink)
-#         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-#         ON CONFLICT(path) DO NOTHING
-#     """, (path, mode, ctime, mtime, size, isdir, islink, ismount, isregular, symlink))
+        isregular = not (os.path.exists(self.path) and not os.path.isfile(self.path) and not self.isdir)
+        if self.isregular != isregular:
+            dirty = True
+            self.isregular = isregular
 
-#     # If row was inserted, lastrowid is nonzero.
-#     return db.lastrowid(), db.lastrowid() == 0
+        symlink = os.readlink(self.path) if self.islink else ''
+        if self.symlink != symlink:
+            dirty = True
+            self.symlink = symlink
 
+        if dirty:
+            self.save(conn)
 
-
-# def fetch_file(db, path):
-
-#     ## Otherwise, file already exists, fetch current entry.
-#     db.execute("""
-#         SELECT id, path, mode, ctime, mtime, size, isdir, islink, ismount, isregular, symlink
-#         FROM paths WHERE path = ?
-#     """, (path,))
-#     return db.fetchone()
-
-
-# def update_file(db, path, mode, ctime, mtime, size, isdir, islink, ismount, isregular, symlink):
-#     db.commit_execute("""
-#         UPDATE paths SET mode = ?, ctime = ?, mtime = ?, size = ?, isdir = ?, islink = ?, ismount = ?, isregular = ?, symlink = ?
-#         WHERE path = ?
-#     """, (mode, ctime, mtime, size, isdir, islink, ismount, isregular, symlink, path))
-
-
-# def update_file_content(db, fileinfo_id, content_id):
-    
-#     db.commit_execute("UPDATE fileinfo SET content_id = ? WHERE id = ?", (content_id, fileinfo_id))
-
-#     return mime
+        return dirty
 
 
 # def update_file_mime(db, path):
@@ -384,53 +268,9 @@ class FileInfo():
 #     }
 
 
-# def store_paths_in_sqlite(db, start_path):
-#     count = 0
-#     for path in walk_follow_symlinks(start_path):
-#         st = os.lstat(path)
-#         mode = st.st_mode
-#         ctime = st.st_ctime 
-#         mtime = st.st_mtime
-#         size = st.st_size
-#         isdir = stat.S_ISDIR(st.st_mode)
-#         islink = stat.S_ISLNK(st.st_mode)
-#         ismount = os.path.ismount(path)
-#         isregular = not (os.path.exists(path) and not os.path.isfile(path) and not isdir)
-#         symlink = os.readlink(path) if islink else ''
-        
-#         count += 1
-#         if count % 1000 == 0:
-#             print(f"PROCESSED {count} PATHS.")
-#             db.commit()
-        
-#         rowid, conflict = try_insert_file(db, path, mode, ctime, mtime, size, isdir, islink, ismount, isregular, symlink)
-
-#         if conflict:
-#             # Check if something changed
-#             db_entry = fetch_file(db, path)
-#             current = (path, mode, ctime, mtime, size, isdir, islink, ismount, isregular, symlink)
-#             if current != db_entry[1:]:
-#                 # There have been updates, update the database.
-#                 print(f"UPDATING PATH: {path}")
-#                 update_file(db, path, mode, ctime, mtime, size, isdir, islink, ismount, isregular, symlink)
-#                 print(f"MIME: {update_file_mime(db, path)}")
-
-#         else:
-#             print(f"NEW PATH: {path}")
-#             try:
-#                 print(f"MIME: {update_file_mime(db, path)}")
-#             except:
-#                 pass
-
-#             try:
-#                 hashes = hash_file(path)
-#                 # TODO: Add hashes to database
-#             except:
-#                 pass
-
-
 
 conn = sqlite3.connect("paths.db")
+conn.row_factory = sqlite3.Row
 cursor = conn.cursor()
 
 cursor.execute("""
@@ -461,17 +301,17 @@ cursor.execute("""
 cursor.execute("""
     CREATE TABLE IF NOT EXISTS fileinfo (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        path TEXT UNIQUE,
-        mode INTEGER,
-        ctime TIMESTAMP,
-        mtime TIMESTAMP,
-        size INTEGER,
-        isdir INTEGER,
-        islink INTEGER,
-        ismount INTEGER,
-        isregular INTEGER,
-        symlink TEXT,
-        content_id INTEGER
+        path TEXT NOT NULL UNIQUE,
+        mode INTEGER DEFAULT 0,
+        ctime TIMESTAMP DEFAULT 0,
+        mtime TIMESTAMP DEFAULT 0,
+        size INTEGER DEFAULT 0,
+        isdir INTEGER DEFAULT 0,
+        islink INTEGER DEFAULT 0,
+        ismount INTEGER DEFAULT 0,
+        isregular INTEGER DEFAULT 0,
+        symlink TEXT DEFAULT '',
+        content_id INTEGER DEFAULT 0
     );
 """)
 
@@ -482,40 +322,19 @@ conn.commit()
 count = 0
 for path in walk_follow_symlinks('/home/chenz/idxscan/ignored'):
 
-    fi = FileInfo(conn, data={'path': path})
-    # TODO: Only do these if needed.
-    fi.load_vfs_info()
-    fi.commit()
+    fi, conflict = FileInfo.create(conn, path)
+    if conflict:
+        fi = FileInfo.load(conn, path)
+        if fi.sync_vfs_info(conn):
+            print(f'DIRTY: {fi.path}')
+            # TODO: Update content and map content to fileinfo
+    else:
+        print(f'NEW: {fi.path}')
+        fi.sync_vfs_info(conn)
+        # TODO: Do content create and map content to fileinfo
     
     count += 1
-    if count % 1000 == 0:
+    if count % 100 == 0:
         print(f"PROCESSED {count} PATHS.")
-        conn.commit()
-    
 
-
-
-#db = SQLiteConnection("paths.db").prepare_database()
-#ms = magic.Magic(mime=True)
-#store_paths_in_sqlite(db, "/home/chenz/ml")
-#db.close()
-
-
-'''
-With MIME:
-
-real    10m34.308s
-user    3m48.595s
-sys     1m25.163s
-
-Without MIME:
-
-real    6m47.411s
-user    0m37.957s
-sys     0m58.443s
-
-With less stat calls.
-
-
-
-'''
+print(f"PROCESSED {count} PATHS.")
