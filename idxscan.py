@@ -465,8 +465,6 @@ def calculate_content(conn, path):
     
     hashes['mime'] = libmagic.from_file(path)
     content.update(**hashes).save(conn)
-    # TODO: Update mime type
-    # TODO: map content to fileinfo
     # TODO: If mime type is thumbnail-able, generate thumbnail
 
     return content
